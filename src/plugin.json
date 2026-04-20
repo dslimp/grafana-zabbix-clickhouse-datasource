@@ -1,0 +1,71 @@
+{
+  "$schema": "https://github.com/grafana/grafana/raw/main/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "app",
+  "name": "Zabbix ClickHouse",
+  "id": "dslimp-zabbix-clickhouse-app",
+  "info": {
+    "description": "Zabbix plugin for Grafana with ClickHouse direct DB support",
+    "author": {
+      "name": "dslimp",
+      "url": "https://github.com/dslimp"
+    },
+    "keywords": ["zabbix", "servers and vms"],
+    "logos": {
+      "small": "img/icn-zabbix-app.svg",
+      "large": "img/icn-zabbix-app.svg"
+    },
+    "links": [
+      {
+        "name": "GitHub",
+        "url": "https://github.com/dslimp/grafana-zabbix-clickhouse-datasource"
+      },
+      {
+        "name": "Docs",
+        "url": "https://github.com/dslimp/grafana-zabbix-clickhouse-datasource/blob/main/docs/clickhouse-mvp.md"
+      },
+      {
+        "name": "License",
+        "url": "https://github.com/dslimp/grafana-zabbix-clickhouse-datasource/blob/main/LICENSE"
+      }
+    ],
+    "screenshots": [
+      {
+        "name": "Showcase",
+        "path": "img/screenshot-showcase.png"
+      },
+      {
+        "name": "Dashboard",
+        "path": "img/screenshot-dashboard01.png"
+      },
+      {
+        "name": "Annotations",
+        "path": "img/screenshot-annotations.png"
+      },
+      {
+        "name": "Metric Editor",
+        "path": "img/screenshot-metric_editor.png"
+      },
+      {
+        "name": "Triggers",
+        "path": "img/screenshot-triggers.png"
+      }
+    ],
+    "version": "%VERSION%",
+    "updated": "%TODAY%"
+  },
+  "includes": [
+    {
+      "type": "datasource",
+      "name": "Zabbix ClickHouse data source",
+      "path": "datasource/plugin.json"
+    },
+    {
+      "type": "panel",
+      "name": "Zabbix ClickHouse problems panel",
+      "path": "panel-triggers/plugin.json"
+    }
+  ],
+  "dependencies": {
+    "grafanaDependency": ">=11.6.0"
+  }
+}

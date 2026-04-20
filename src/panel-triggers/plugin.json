@@ -1,0 +1,15 @@
+{
+  "type": "panel",
+  "name": "Zabbix ClickHouse Problems",
+  "id": "dslimp-zabbix-clickhouse-triggers-panel",
+  "info": {
+    "author": {
+      "name": "dslimp",
+      "url": "https://github.com/dslimp"
+    },
+    "logos": {
+      "small": "img/icn-zabbix-problems-panel.svg",
+      "large": "img/icn-zabbix-problems-panel.svg"
+    }
+  }
+}

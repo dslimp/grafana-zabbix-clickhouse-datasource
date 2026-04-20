@@ -1,0 +1,33 @@
+tables:
+  - history
+  - history_uint
+  - trends
+  - trends_uint
+
+source:
+  type: mysql
+  host: 127.0.0.1
+  port: 3306
+  database: zabbix_database
+  user: zabbix
+  password: change-me
+
+clickhouse:
+  scheme: http
+  host: 127.0.0.1
+  port: 8123
+  database: zabbix_numeric
+  user: default
+  password: ""
+
+state:
+  file: /var/lib/zbx-clickhouse-sync/state.json
+
+sync:
+  batch_size: 20000
+  backfill_start_clock: 0
+  overlap_seconds: 300
+  repair_window_seconds: 14400
+  sleep_seconds: 60
+  repair_every: 30
+
