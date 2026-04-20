@@ -118,7 +118,7 @@ export class SQLConnector {
   invokeSQLQuery(query) {
     const queryDef = {
       refId: 'A',
-      format: 'time_series',
+      format: this.datasource.type === supportedDatabases.clickhouse ? 0 : 'time_series',
       datasource: {
         type: this.datasource.type,
         uid: this.datasource.uid,
