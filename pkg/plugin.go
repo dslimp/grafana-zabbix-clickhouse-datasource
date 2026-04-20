@@ -10,7 +10,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend/resource/httpadapter"
 )
 
-const ZABBIX_PLUGIN_ID = "alexanderzobnin-zabbix-datasource"
+const ZABBIX_PLUGIN_ID = "dslimp-zabbix-clickhouse-datasource"
 
 func main() {
 	backend.SetupPluginEnvironment(ZABBIX_PLUGIN_ID)
