@@ -58,6 +58,8 @@ Use a two-phase pipeline.
 
 - read tables in batches by `itemid` slices
 - optionally narrow by `clock` windows
+- allow a separate aggressive profile for the one-time load
+- use parallel backfill workers without forcing the same concurrency on steady-state sync
 - load into ClickHouse in bulk
 - store checkpoints outside the plugin
 
@@ -123,9 +125,16 @@ Core shape:
 
 - one config file
 - one state file
-- one process
+- one lighter steady-state process
 - recurring `catchup`
 - periodic `repair`
+
+Initial bulk load can be much heavier than steady-state sync.
+
+Recommended split:
+
+- `backfill_batch_size` and `backfill_processes` for the one-time load
+- smaller regular `batch_size` for `catchup` and `repair`
 
 The first scaffold for this service lives in:
 

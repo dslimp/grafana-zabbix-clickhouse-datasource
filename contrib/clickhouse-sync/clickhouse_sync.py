@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import sys
 import time
@@ -142,6 +143,12 @@ def build_select_sql(table, start_clock, end_clock, itemid_start, itemid_end, ba
     )
 
 
+def batch_size_for_mode(config, mode_name):
+    if mode_name == "backfill":
+        return int(config["sync"].get("backfill_batch_size", config["sync"]["batch_size"]))
+    return int(config["sync"]["batch_size"])
+
+
 def fetch_rows(conn, source_type, sql):
     if source_type == "mysql":
         with conn.cursor() as cur:
@@ -232,13 +239,11 @@ def emit_event(kind, **payload):
     print(json.dumps(record, sort_keys=True), flush=True)
 
 
-def run_slice(conn, config, state, table, start_clock, end_clock, itemid_start, itemid_end):
+def load_slice(conn, config, table, start_clock, end_clock, itemid_start, itemid_end, batch_size):
     source_type = config["source"]["type"]
-    batch_size = int(config["sync"]["batch_size"])
-    info = table_state(state, table)
     cursor = None
     total_rows = 0
-    max_clock = info.get("last_clock") or 0
+    max_clock = 0
     while True:
         sql = build_select_sql(table, start_clock, end_clock, itemid_start, itemid_end, batch_size, cursor)
         rows = fetch_rows(conn, source_type, sql)
@@ -249,10 +254,17 @@ def run_slice(conn, config, state, table, start_clock, end_clock, itemid_start, 
         last_row = rows[-1]
         cursor = row_cursor(table, last_row)
         max_clock = max(max_clock, int(last_row["clock"]))
-        info["last_run_at"] = now_clock()
-        save_state(config["state"]["file"], state)
         if len(rows) < batch_size:
             break
+    return (total_rows, max_clock)
+
+
+def run_slice(conn, config, state, table, start_clock, end_clock, itemid_start, itemid_end):
+    batch_size = batch_size_for_mode(config, "backfill")
+    info = table_state(state, table)
+    total_rows, max_clock = load_slice(conn, config, table, start_clock, end_clock, itemid_start, itemid_end, batch_size)
+    info["last_run_at"] = now_clock()
+    save_state(config["state"]["file"], state)
     if total_rows:
         emit_event(
             "slice_loaded",
@@ -262,8 +274,24 @@ def run_slice(conn, config, state, table, start_clock, end_clock, itemid_start, 
             itemid_to=itemid_end,
             start_clock=start_clock,
             end_clock=end_clock,
-        )
+    )
     return (total_rows, max_clock)
+
+
+def process_slice(config, table, start_clock, end_clock, itemid_start, itemid_end, batch_size):
+    conn = source_connect(config)
+    try:
+        rows, max_clock = load_slice(conn, config, table, start_clock, end_clock, itemid_start, itemid_end, batch_size)
+        return {
+            "rows": rows,
+            "max_clock": max_clock,
+            "itemid_from": itemid_start,
+            "itemid_to": itemid_end,
+            "start_clock": start_clock,
+            "end_clock": end_clock,
+        }
+    finally:
+        conn.close()
 
 
 def iter_slices(min_itemid, max_itemid, slice_width, start_from=None):
@@ -276,12 +304,50 @@ def iter_slices(min_itemid, max_itemid, slice_width, start_from=None):
         current = upper + 1
 
 
+def advance_next_itemid(slices, completed, start_from):
+    if not slices:
+        return None
+    next_itemid = start_from
+    completed_by_start = {itemid_start: itemid_end for itemid_start, itemid_end in completed}
+    while next_itemid in completed_by_start:
+        next_itemid = completed_by_start[next_itemid] + 1
+    return next_itemid
+
+
+def run_backfill_parallel(config, state, table, start_clock, end_clock, slices, process_count):
+    info = table_state(state, table)
+    batch_size = batch_size_for_mode(config, "backfill")
+    next_itemid = slices[0][0]
+    completed = set()
+    table_total = 0
+    max_clock = info.get("last_clock") or 0
+    worker_count = min(process_count, len(slices))
+    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(process_slice, config, table, start_clock, end_clock, itemid_start, itemid_end, batch_size): (itemid_start, itemid_end)
+            for itemid_start, itemid_end in slices
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            table_total += result["rows"]
+            max_clock = max(max_clock, result["max_clock"])
+            completed.add((result["itemid_from"], result["itemid_to"]))
+            info["backfill_next_itemid"] = advance_next_itemid(slices, completed, next_itemid)
+            info["last_clock"] = max_clock if max_clock else info.get("last_clock")
+            info["last_run_at"] = now_clock()
+            save_state(config["state"]["file"], state)
+            if result["rows"]:
+                emit_event("slice_loaded", table=table, rows=result["rows"], itemid_from=result["itemid_from"], itemid_to=result["itemid_to"], start_clock=start_clock, end_clock=end_clock)
+    return (table_total, max_clock)
+
+
 def run_backfill(conn, config, state, tables):
     total = {}
     source_type = config["source"]["type"]
     start_clock = int(config["sync"].get("backfill_start_clock", 0))
     end_clock = now_clock()
     slice_width = int(config["sync"]["backfill_itemid_slice_width"])
+    process_count = int(config["sync"].get("backfill_processes", 1))
     for table in tables:
         info = table_state(state, table)
         if info.get("backfill_completed"):
@@ -296,12 +362,19 @@ def run_backfill(conn, config, state, tables):
             total[table] = 0
             continue
         next_itemid = info.get("backfill_next_itemid")
-        for itemid_start, itemid_end in iter_slices(min_itemid, max_itemid, slice_width, next_itemid):
-            rows, max_clock = run_slice(conn, config, state, table, start_clock, end_clock, itemid_start, itemid_end)
+        slices = list(iter_slices(min_itemid, max_itemid, slice_width, next_itemid))
+        if process_count > 1 and len(slices) > 1:
+            rows, max_clock = run_backfill_parallel(config, state, table, start_clock, end_clock, slices, process_count)
             table_total += rows
-            info["backfill_next_itemid"] = itemid_end + 1
             info["last_clock"] = max_clock if max_clock else info.get("last_clock")
             save_state(config["state"]["file"], state)
+        else:
+            for itemid_start, itemid_end in slices:
+                rows, max_clock = run_slice(conn, config, state, table, start_clock, end_clock, itemid_start, itemid_end)
+                table_total += rows
+                info["backfill_next_itemid"] = itemid_end + 1
+                info["last_clock"] = max_clock if max_clock else info.get("last_clock")
+                save_state(config["state"]["file"], state)
         info["backfill_completed"] = True
         info["backfill_next_itemid"] = None
         info["last_clock"] = end_clock
