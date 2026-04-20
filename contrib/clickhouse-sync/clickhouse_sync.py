@@ -100,8 +100,6 @@ def source_connect(config):
 
 
 def table_order_columns(table):
-    if table in ("history", "history_uint"):
-        return ("itemid", "clock", "ns")
     return ("itemid", "clock")
 
 
@@ -111,25 +109,16 @@ def table_value_columns(table):
     return ("itemid", "clock", "num", "value_min", "value_avg", "value_max")
 
 
-def build_cursor_clause(table, cursor):
+def build_main_cursor_clause(cursor):
     if not cursor:
         return ""
-    if table in ("history", "history_uint"):
-        return (
-            "AND (itemid > {itemid} OR "
-            "(itemid = {itemid} AND clock > {clock}) OR "
-            "(itemid = {itemid} AND clock = {clock} AND ns > {ns}))"
-        ).format(itemid=int(cursor["itemid"]), clock=int(cursor["clock"]), ns=int(cursor["ns"]))
-    return (
-        "AND (itemid > {itemid} OR "
-        "(itemid = {itemid} AND clock > {clock}))"
-    ).format(itemid=int(cursor["itemid"]), clock=int(cursor["clock"]))
+    return "AND (itemid, clock) > ({itemid}, {clock})".format(itemid=int(cursor["itemid"]), clock=int(cursor["clock"]))
 
 
-def build_select_sql(table, start_clock, end_clock, itemid_start, itemid_end, batch_size, cursor):
+def build_main_select_sql(table, start_clock, end_clock, itemid_start, itemid_end, batch_size, cursor):
     columns = ", ".join(table_value_columns(table))
     order_by = ", ".join(table_order_columns(table))
-    cursor_clause = build_cursor_clause(table, cursor)
+    cursor_clause = build_main_cursor_clause(cursor)
     return (
         f"SELECT {columns} "
         f"FROM {table} "
@@ -139,6 +128,21 @@ def build_select_sql(table, start_clock, end_clock, itemid_start, itemid_end, ba
         f"AND clock <= {int(end_clock)} "
         f"{cursor_clause} "
         f"ORDER BY {order_by} "
+        f"LIMIT {int(batch_size)}"
+    )
+
+
+def build_exact_history_select_sql(table, start_clock, end_clock, itemid, clock, ns, batch_size):
+    columns = ", ".join(table_value_columns(table))
+    return (
+        f"SELECT {columns} "
+        f"FROM {table} "
+        f"WHERE itemid = {int(itemid)} "
+        f"AND clock = {int(clock)} "
+        f"AND clock >= {int(start_clock)} "
+        f"AND clock <= {int(end_clock)} "
+        f"AND ns > {int(ns)} "
+        f"ORDER BY ns "
         f"LIMIT {int(batch_size)}"
     )
 
@@ -228,10 +232,18 @@ def version_token():
     return time.time_ns()
 
 
-def row_cursor(table, row):
-    if table in ("history", "history_uint"):
-        return {"itemid": int(row["itemid"]), "clock": int(row["clock"]), "ns": int(row["ns"])}
+def main_row_cursor(row):
     return {"itemid": int(row["itemid"]), "clock": int(row["clock"])}
+
+
+def history_pair(row):
+    return (int(row["itemid"]), int(row["clock"]))
+
+
+def sort_rows(table, rows):
+    if table in ("history", "history_uint"):
+        return sorted(rows, key=lambda row: (int(row["itemid"]), int(row["clock"]), int(row["ns"])))
+    return rows
 
 
 def emit_event(kind, **payload):
@@ -242,19 +254,57 @@ def emit_event(kind, **payload):
 def load_slice(conn, config, table, start_clock, end_clock, itemid_start, itemid_end, batch_size):
     source_type = config["source"]["type"]
     cursor = None
+    pending_exact = None
+    pending_ns = -1
     total_rows = 0
     max_clock = 0
     while True:
-        sql = build_select_sql(table, start_clock, end_clock, itemid_start, itemid_end, batch_size, cursor)
-        rows = fetch_rows(conn, source_type, sql)
+        if table in ("history", "history_uint") and pending_exact is not None:
+            sql = build_exact_history_select_sql(
+                table,
+                start_clock,
+                end_clock,
+                pending_exact["itemid"],
+                pending_exact["clock"],
+                pending_ns,
+                batch_size + 1,
+            )
+            rows = sort_rows(table, fetch_rows(conn, source_type, sql))
+            if not rows:
+                cursor = dict(pending_exact)
+                pending_exact = None
+                pending_ns = -1
+                continue
+            process_rows = rows[:batch_size]
+            clickhouse_insert(config, table, process_rows, version_token())
+            total_rows += len(process_rows)
+            last_row = process_rows[-1]
+            max_clock = max(max_clock, int(last_row["clock"]))
+            if len(rows) > batch_size:
+                pending_ns = int(last_row["ns"])
+            else:
+                cursor = dict(pending_exact)
+                pending_exact = None
+                pending_ns = -1
+            continue
+        sql = build_main_select_sql(table, start_clock, end_clock, itemid_start, itemid_end, batch_size + 1, cursor)
+        rows = sort_rows(table, fetch_rows(conn, source_type, sql))
         if not rows:
             break
-        clickhouse_insert(config, table, rows, version_token())
-        total_rows += len(rows)
-        last_row = rows[-1]
-        cursor = row_cursor(table, last_row)
+        process_rows = rows[:batch_size]
+        if table in ("history", "history_uint") and len(rows) > batch_size and history_pair(rows[batch_size - 1]) == history_pair(rows[batch_size]):
+            boundary_pair = history_pair(rows[batch_size - 1])
+            process_rows = [row for row in process_rows if history_pair(row) != boundary_pair]
+            pending_exact = {"itemid": boundary_pair[0], "clock": boundary_pair[1]}
+            pending_ns = -1
+            if not process_rows:
+                continue
+        clickhouse_insert(config, table, process_rows, version_token())
+        total_rows += len(process_rows)
+        last_row = process_rows[-1]
+        cursor = main_row_cursor(last_row)
         max_clock = max(max_clock, int(last_row["clock"]))
-        if len(rows) < batch_size:
+        if len(rows) <= batch_size and pending_exact is None:
             break
     return (total_rows, max_clock)
 
