@@ -26,8 +26,8 @@ state:
 sync:
   batch_size: 20000
   backfill_start_clock: 0
+  backfill_itemid_slice_width: 500
   overlap_seconds: 300
   repair_window_seconds: 14400
   sleep_seconds: 60
   repair_every: 30
-

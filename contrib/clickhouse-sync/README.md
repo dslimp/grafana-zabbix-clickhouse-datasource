@@ -7,7 +7,7 @@ The worker is intentionally separate from the Grafana plugin runtime.
 
 It is designed for:
 
-- initial backfill of Zabbix numeric tables into ClickHouse
+- initial backfill of Zabbix numeric tables into ClickHouse using `itemid` slices
 - recurring catch-up with a bounded overlap window
 - periodic repair of a recent time window
 - dedup-aware writes into `ReplacingMergeTree(_version)` tables
